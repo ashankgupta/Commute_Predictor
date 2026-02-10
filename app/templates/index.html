@@ -2,20 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Traffic Simulator – Jammu</title>
+  <title>Real-Time Commute Predictor</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
-
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <style>
-    html, body, #map {
-      height: 100%;
-      margin: 0;
-    }
+    html, body, #map { height: 100%; margin: 0; }
 
-    /* Tooltip styling */
     .route-label {
       background: rgba(15, 23, 42, 0.9);
       color: #e5e7eb;
@@ -23,7 +18,6 @@
       border-radius: 6px;
       padding: 2px 6px;
       font-size: 11px;
-      font-weight: 500;
       white-space: nowrap;
     }
   </style>
@@ -34,21 +28,63 @@
 <div class="flex h-screen">
 
   <!-- LEFT PANEL -->
-  <div class="w-[360px] bg-slate-900/95 p-4 border-r border-white/10">
-    <h1 class="text-xl font-bold mb-3">🚦 Traffic Simulator (Jammu)</h1>
+  <div class="w-[400px] bg-slate-900/95 p-4 border-r border-white/10 flex flex-col">
 
-    <label class="text-sm text-slate-400">Focus Location</label>
-    <select id="locationSelect"
-      class="w-full mt-1 p-2 bg-black/40 border border-white/10 rounded">
-      <option value="">-- Select --</option>
-      <option>Bahu Plaza</option>
-      <option>Gandhi Nagar</option>
-      <option>Channi</option>
-      <option>Bathindi</option>
-    </select>
+    <h1 class="text-xl font-bold mb-3">🚦 Real-Time Commute Predictor</h1>
 
-    <p class="mt-4 text-xs text-slate-500">
-      4 fixed routes • 1 car per route • live labels
+    <!-- USER INPUT -->
+    <div class="space-y-3">
+      <div>
+        <label class="text-sm text-slate-400">Source</label>
+        <select id="sourceSelect"
+          class="w-full mt-1 p-2 bg-black/40 border border-white/10 rounded">
+          <option value="">-- Select Source --</option>
+          <option>Bahu Plaza</option>
+          <option>Gandhi Nagar</option>
+          <option>Channi</option>
+          <option>Bathindi</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="text-sm text-slate-400">Destination</label>
+        <select id="destSelect"
+          class="w-full mt-1 p-2 bg-black/40 border border-white/10 rounded">
+          <option value="">-- Select Destination --</option>
+          <option>Bahu Plaza</option>
+          <option>Gandhi Nagar</option>
+          <option>Channi</option>
+          <option>Bathindi</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- ERROR -->
+    <div id="formError"
+      class="hidden mt-3 text-sm text-red-400">
+    </div>
+
+    <!-- LOADING -->
+    <div id="loading"
+      class="hidden mt-4 flex items-center gap-2 text-slate-400 text-sm">
+      <div class="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+      Calculating commute…
+    </div>
+
+    <!-- RESULT -->
+    <div id="result"
+      class="hidden mt-4 space-y-1 text-sm bg-black/40 p-3 rounded border border-white/10">
+      <div>Distance: <span id="distance"></span></div>
+      <div class="text-green-400 font-semibold">
+        ETA: <span id="eta"></span>
+      </div>
+      <div class="text-xs text-slate-500">
+        Live countdown in progress
+      </div>
+    </div>
+
+    <p class="mt-auto text-xs text-slate-500">
+      Background traffic simulation runs continuously
     </p>
   </div>
 
@@ -57,11 +93,11 @@
 </div>
 
 <script>
-/* ---------------- MAP ---------------- */
+/* ================= MAP ================= */
 const map = L.map("map").setView([32.700, 74.860], 13);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
 
-/* ---------------- LOCATIONS ---------------- */
+/* ================= LOCATIONS ================= */
 const LOCATIONS = {
   "Bahu Plaza": [32.7085, 74.8570],
   "Gandhi Nagar": [32.7064, 74.8741],
@@ -69,7 +105,7 @@ const LOCATIONS = {
   "Bathindi": [32.6826, 74.8297]
 };
 
-/* ---------------- ROUTES (FIXED) ---------------- */
+/* ================= TRAFFIC ROUTES ================= */
 const ROUTES = [
   ["Bahu Plaza", "Gandhi Nagar"],
   ["Gandhi Nagar", "Channi"],
@@ -77,7 +113,7 @@ const ROUTES = [
   ["Bathindi", "Bahu Plaza"]
 ];
 
-/* ---------------- CAR ICON ---------------- */
+/* ================= ICON ================= */
 const carIcon = L.divIcon({
   html: `<div style="font-size:22px; transform: translate(-50%, -50%);">🚗</div>`,
   iconSize: [22, 22],
@@ -85,100 +121,140 @@ const carIcon = L.divIcon({
   className: ""
 });
 
-/* ---------------- STATE ---------------- */
+/* ================= TRAFFIC SIMULATION ================= */
 let cars = [];
 
-/* ---------------- HELPERS ---------------- */
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
-/* ---------------- INIT SIMULATION ---------------- */
-function initSimulation() {
+function initTraffic() {
+  ROUTES.forEach(([from, to]) => {
+    const start = LOCATIONS[from];
+    const end = LOCATIONS[to];
 
-  ROUTES.forEach(route => {
-    const fromName = route[0];
-    const toName = route[1];
-
-    const start = LOCATIONS[fromName];
-    const end = LOCATIONS[toName];
-
-    // draw route path
     const path = L.polyline([start, end], {
       color: "#3b82f6",
       weight: 3,
       dashArray: "6 6"
     }).addTo(map);
 
-    // car marker
     const marker = L.marker(start, { icon: carIcon }).addTo(map);
 
-    // tooltip showing source → destination
     marker.bindTooltip(
-      `${fromName} → ${toName}`,
-      {
-        permanent: true,
-        direction: "top",
-        offset: [0, -14],
-        className: "route-label"
-      }
+      `${from} → ${to}`,
+      { permanent: true, direction: "top", offset: [0, -14], className: "route-label" }
     );
 
-    cars.push({
-      marker,
-      path,
-      start,
-      end,
-      fromName,
-      toName,
-      t: Math.random()
-    });
+    cars.push({ marker, path, start, end, from, to, t: Math.random() });
   });
 
-  // movement loop
   setInterval(() => {
     cars.forEach(car => {
       car.t += 0.02;
 
       if (car.t >= 1) {
         car.t = 0;
-
-        // swap direction
-        const tmp = car.start;
-        car.start = car.end;
-        car.end = tmp;
-
-        const tmpName = car.fromName;
-        car.fromName = car.toName;
-        car.toName = tmpName;
-
+        [car.start, car.end] = [car.end, car.start];
+        [car.from, car.to] = [car.to, car.from];
         car.path.setLatLngs([car.start, car.end]);
-
-        // update label text
-        car.marker.setTooltipContent(
-          `${car.fromName} → ${car.toName}`
-        );
+        car.marker.setTooltipContent(`${car.from} → ${car.to}`);
       }
 
       const lat = lerp(car.start[0], car.end[0], car.t);
       const lng = lerp(car.start[1], car.end[1], car.t);
-
       car.marker.setLatLng([lat, lng]);
     });
   }, 1000);
 }
 
-/* ---------------- FOCUS HANDLER ---------------- */
-document.getElementById("locationSelect")
-  .addEventListener("change", e => {
-    const key = e.target.value;
-    if (key) {
-      map.setView(LOCATIONS[key], 15, { animate: true });
-    }
-  });
+/* ================= USER COMMUTE ETA ================= */
+let journeyStartTime = null;
+let initialDistanceKm = 0;
+let initialEtaMin = 0;
+let etaTimer = null;
 
-/* ---------------- AUTO START ---------------- */
-initSimulation();
+const loading = document.getElementById("loading");
+const result = document.getElementById("result");
+const distanceEl = document.getElementById("distance");
+const etaEl = document.getElementById("eta");
+const formError = document.getElementById("formError");
+
+async function startUserJourney() {
+  const src = document.getElementById("sourceSelect").value;
+  const dst = document.getElementById("destSelect").value;
+
+  // reset UI
+  formError.classList.add("hidden");
+  result.classList.add("hidden");
+
+  // ---- VALIDATION ----
+  if (!src || !dst) {
+    formError.textContent = "Please select both source and destination.";
+    formError.classList.remove("hidden");
+    return;
+  }
+
+  if (src === dst) {
+    formError.textContent = "Source and destination cannot be the same.";
+    formError.classList.remove("hidden");
+    return;
+  }
+  // --------------------
+
+  loading.classList.remove("hidden");
+
+  const res = await fetch(
+    `/eta?source=${encodeURIComponent(src)}&destination=${encodeURIComponent(dst)}`
+  );
+  const data = await res.json();
+
+  loading.classList.add("hidden");
+
+  if (!res.ok) {
+    formError.textContent = data.detail || "Failed to calculate ETA.";
+    formError.classList.remove("hidden");
+    return;
+  }
+
+  initialDistanceKm = parseFloat(data.distance);
+  initialEtaMin = parseFloat(data.duration_normal);
+  journeyStartTime = Date.now();
+
+  result.classList.remove("hidden");
+
+  if (etaTimer) clearInterval(etaTimer);
+  etaTimer = setInterval(updateLiveETA, 1000);
+
+  map.setView(LOCATIONS[dst], 15, { animate: true });
+}
+
+function updateLiveETA() {
+  const elapsedMin = (Date.now() - journeyStartTime) / 60000;
+
+  let remainingEta = Math.max(initialEtaMin - elapsedMin, 0);
+  let ratio = remainingEta / initialEtaMin;
+
+  let remainingDistance = Math.max(initialDistanceKm * ratio, 0);
+
+  distanceEl.textContent = remainingDistance.toFixed(2) + " km";
+  etaEl.textContent = remainingEta > 0
+    ? remainingEta.toFixed(1) + " mins"
+    : "Arrived";
+
+  if (remainingEta <= 0) {
+    clearInterval(etaTimer);
+    distanceEl.textContent = "0 km";
+  }
+}
+
+["sourceSelect", "destSelect"].forEach(id => {
+  document.getElementById(id)
+    .addEventListener("change", startUserJourney);
+});
+
+/* ================= AUTO START TRAFFIC ================= */
+initTraffic();
 </script>
 
 </body>
