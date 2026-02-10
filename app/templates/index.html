@@ -2,61 +2,54 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Real-Time Commute Predictor</title>
+  <title>Traffic Simulator – Jammu</title>
 
-  <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <style>
-    html, body {
+    html, body, #map {
       height: 100%;
       margin: 0;
     }
-    #map {
-      height: 100%;
-      width: 100%;
+
+    /* Tooltip styling */
+    .route-label {
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-size: 11px;
+      font-weight: 500;
+      white-space: nowrap;
     }
   </style>
 </head>
 
-<body class="h-screen w-screen overflow-hidden bg-slate-900 text-white">
+<body class="bg-slate-900 text-white">
 
-<div class="flex h-full w-full">
+<div class="flex h-screen">
 
   <!-- LEFT PANEL -->
-  <div class="w-[420px] min-w-[360px] bg-slate-900/90 backdrop-blur-xl border-r border-white/10 p-6 flex flex-col">
+  <div class="w-[360px] bg-slate-900/95 p-4 border-r border-white/10">
+    <h1 class="text-xl font-bold mb-3">🚦 Traffic Simulator (Jammu)</h1>
 
-    <h1 class="text-2xl font-extrabold mb-1">🚦 Real-Time Commute Predictor</h1>
-    <p class="text-slate-400 text-sm mb-6">Commute simulation with live ETA</p>
+    <label class="text-sm text-slate-400">Focus Location</label>
+    <select id="locationSelect"
+      class="w-full mt-1 p-2 bg-black/40 border border-white/10 rounded">
+      <option value="">-- Select --</option>
+      <option>Bahu Plaza</option>
+      <option>Gandhi Nagar</option>
+      <option>Channi</option>
+      <option>Bathindi</option>
+    </select>
 
-    <div class="space-y-4">
-      <input id="source" placeholder="Source (e.g. Connaught Place, Delhi)"
-        class="w-full px-4 py-3 rounded bg-black/40 border border-white/10"/>
-
-      <input id="destination" placeholder="Destination (e.g. Sector 62, Noida)"
-        class="w-full px-4 py-3 rounded bg-black/40 border border-white/10"/>
-
-      <button id="btn" onclick="getETA()"
-        class="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded font-semibold">
-        Predict & Simulate
-      </button>
-    </div>
-
-    <div id="loading" class="hidden mt-4 text-slate-400">
-      Loading route…
-    </div>
-
-    <div id="result" class="hidden mt-4 space-y-1 text-sm">
-      <div>Distance: <span id="distance"></span></div>
-      <div>Duration: <span id="normal"></span></div>
-      <div class="text-green-400">ETA: <span id="traffic"></span></div>
-    </div>
-
-    <div id="error" class="hidden mt-4 text-red-400 text-sm"></div>
+    <p class="mt-4 text-xs text-slate-500">
+      4 fixed routes • 1 car per route • live labels
+    </p>
   </div>
 
   <!-- MAP -->
@@ -64,148 +57,128 @@
 </div>
 
 <script>
-/* -------------------- DOM -------------------- */
-const sourceInput = document.getElementById("source");
-const destinationInput = document.getElementById("destination");
-const loading = document.getElementById("loading");
-const result = document.getElementById("result");
-const error = document.getElementById("error");
-const distance = document.getElementById("distance");
-const normal = document.getElementById("normal");
-const traffic = document.getElementById("traffic");
+/* ---------------- MAP ---------------- */
+const map = L.map("map").setView([32.700, 74.860], 13);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
 
-/* -------------------- MAP -------------------- */
-let map = L.map("map").setView([28.6139, 77.2090], 11);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; OpenStreetMap"
-}).addTo(map);
+/* ---------------- LOCATIONS ---------------- */
+const LOCATIONS = {
+  "Bahu Plaza": [32.7085, 74.8570],
+  "Gandhi Nagar": [32.7064, 74.8741],
+  "Channi": [32.6880, 74.8605],
+  "Bathindi": [32.6826, 74.8297]
+};
 
-/* -------------------- STATE -------------------- */
-let routeLayer = null;
-let vehicleMarker = null;
-let simulationTimer = null;
-let route = [];
-let step = 0;
-let totalDistance = 0;
-let totalDuration = 0;
+/* ---------------- ROUTES (FIXED) ---------------- */
+const ROUTES = [
+  ["Bahu Plaza", "Gandhi Nagar"],
+  ["Gandhi Nagar", "Channi"],
+  ["Channi", "Bathindi"],
+  ["Bathindi", "Bahu Plaza"]
+];
 
-const POINTS_PER_TICK = 50;
-const TICK_INTERVAL = 1000;
-
-/* -------------------- CAR ICON (FIXED) -------------------- */
+/* ---------------- CAR ICON ---------------- */
 const carIcon = L.divIcon({
-  html: `<div style="
-    font-size: 28px;
-    transform: translate(-50%, -50%);
-  ">🚗</div>`,
-  iconSize: [28, 28],
-  iconAnchor: [14, 14],
+  html: `<div style="font-size:22px; transform: translate(-50%, -50%);">🚗</div>`,
+  iconSize: [22, 22],
+  iconAnchor: [11, 11],
   className: ""
 });
 
-/* -------------------- HELPERS -------------------- */
-function haversine(a, b) {
-  const R = 6371;
-  const dLat = (b[0] - a[0]) * Math.PI / 180;
-  const dLon = (b[1] - a[1]) * Math.PI / 180;
-  const la1 = a[0] * Math.PI / 180;
-  const la2 = b[0] * Math.PI / 180;
+/* ---------------- STATE ---------------- */
+let cars = [];
 
-  return 2 * R * Math.asin(Math.sqrt(
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(la1) * Math.cos(la2) *
-    Math.sin(dLon / 2) ** 2
-  ));
+/* ---------------- HELPERS ---------------- */
+function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
-/* -------------------- MAIN -------------------- */
-async function getETA() {
-  const s = sourceInput.value.trim();
-  const d = destinationInput.value.trim();
-  if (!s || !d) return;
+/* ---------------- INIT SIMULATION ---------------- */
+function initSimulation() {
 
-  error.classList.add("hidden");
-  result.classList.add("hidden");
-  loading.classList.remove("hidden");
+  ROUTES.forEach(route => {
+    const fromName = route[0];
+    const toName = route[1];
 
-  if (simulationTimer) clearInterval(simulationTimer);
-  if (routeLayer) map.removeLayer(routeLayer);
-  if (vehicleMarker) map.removeLayer(vehicleMarker);
+    const start = LOCATIONS[fromName];
+    const end = LOCATIONS[toName];
 
-  const res = await fetch(`/eta?source=${encodeURIComponent(s)}&destination=${encodeURIComponent(d)}`);
-  const data = await res.json();
+    // draw route path
+    const path = L.polyline([start, end], {
+      color: "#3b82f6",
+      weight: 3,
+      dashArray: "6 6"
+    }).addTo(map);
 
-  loading.classList.add("hidden");
+    // car marker
+    const marker = L.marker(start, { icon: carIcon }).addTo(map);
 
-  if (!res.ok) {
-    error.textContent = data.detail || "Error fetching route";
-    error.classList.remove("hidden");
-    return;
-  }
+    // tooltip showing source → destination
+    marker.bindTooltip(
+      `${fromName} → ${toName}`,
+      {
+        permanent: true,
+        direction: "top",
+        offset: [0, -14],
+        className: "route-label"
+      }
+    );
 
-  route = data.geometry;
-  step = 0;
-  totalDistance = parseFloat(data.distance);
-  totalDuration = parseFloat(data.duration_normal);
+    cars.push({
+      marker,
+      path,
+      start,
+      end,
+      fromName,
+      toName,
+      t: Math.random()
+    });
+  });
 
-  distance.textContent = data.distance;
-  normal.textContent = data.duration_normal;
-  traffic.textContent = data.duration_in_traffic;
-  result.classList.remove("hidden");
+  // movement loop
+  setInterval(() => {
+    cars.forEach(car => {
+      car.t += 0.02;
 
-  routeLayer = L.polyline(route, {
-    color: "#3b82f6",
-    weight: 5
-  }).addTo(map);
+      if (car.t >= 1) {
+        car.t = 0;
 
-  map.fitBounds(routeLayer.getBounds(), { padding: [40, 40] });
+        // swap direction
+        const tmp = car.start;
+        car.start = car.end;
+        car.end = tmp;
 
-  vehicleMarker = L.marker(route[0], { icon: carIcon })
-    .addTo(map)
-    .bindPopup("🚗 Vehicle")
-    .openPopup();
+        const tmpName = car.fromName;
+        car.fromName = car.toName;
+        car.toName = tmpName;
 
-  startSimulation();
+        car.path.setLatLngs([car.start, car.end]);
+
+        // update label text
+        car.marker.setTooltipContent(
+          `${car.fromName} → ${car.toName}`
+        );
+      }
+
+      const lat = lerp(car.start[0], car.end[0], car.t);
+      const lng = lerp(car.start[1], car.end[1], car.t);
+
+      car.marker.setLatLng([lat, lng]);
+    });
+  }, 1000);
 }
 
-/* -------------------- SIMULATION -------------------- */
-function startSimulation() {
-  if (simulationTimer) clearInterval(simulationTimer);
-
-  simulationTimer = setInterval(() => {
-
-    // Move multiple steps per tick
-    step += POINTS_PER_TICK;
-
-    // Reached destination
-    if (step >= route.length - 1) {
-      step = route.length - 1;
-      vehicleMarker.setLatLng(route[step]);
-      clearInterval(simulationTimer);
-      vehicleMarker.bindPopup("✅ Reached Destination").openPopup();
-      return;
+/* ---------------- FOCUS HANDLER ---------------- */
+document.getElementById("locationSelect")
+  .addEventListener("change", e => {
+    const key = e.target.value;
+    if (key) {
+      map.setView(LOCATIONS[key], 15, { animate: true });
     }
+  });
 
-    // Move vehicle
-    vehicleMarker.setLatLng(route[step]);
-    map.panTo(route[step], { animate: true, duration: 0.5 });
-
-    // ---- Distance calculation ----
-    let covered = 0;
-    for (let i = 0; i < step; i++) {
-      covered += haversine(route[i], route[i + 1] || route[i]);
-    }
-
-    const remaining = Math.max(totalDistance - covered, 0);
-    const eta = (remaining / totalDistance * totalDuration).toFixed(1);
-
-    distance.textContent = remaining.toFixed(2) + " km";
-    normal.textContent = eta + " mins";
-    traffic.textContent = eta + " mins";
-
-  }, TICK_INTERVAL);
-}
-
+/* ---------------- AUTO START ---------------- */
+initSimulation();
 </script>
 
 </body>
