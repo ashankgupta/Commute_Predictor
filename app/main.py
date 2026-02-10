@@ -9,34 +9,33 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # -------------------------------------------------
-# ENV + PATH SETUP
+# ENV
 # -------------------------------------------------
 load_dotenv()
 
-ORS_API_KEY = os.getenv("ORS_API_KEY")
-if not ORS_API_KEY:
-    raise RuntimeError("ORS_API_KEY not found in .env")
-
 BASE_DIR = Path(__file__).resolve().parent
-TEMPLATES_DIR = BASE_DIR / "templates"
-
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 app = FastAPI(title="Real-Time Commute Predictor")
 
 # -------------------------------------------------
-# REQUESTS SESSION WITH RETRY
+# PREDEFINED JAMMU LOCATIONS (SOURCE OF TRUTH)
+# -------------------------------------------------
+JAMMU_LOCATIONS = {
+    "Bahu Plaza": (74.8570, 32.7085),
+    "Gandhi Nagar": (74.8741, 32.7064),
+    "Channi": (74.8605, 32.6880),
+    "Bathindi": (74.8297, 32.6826),
+}
+
+# -------------------------------------------------
+# REQUEST SESSION
 # -------------------------------------------------
 def create_session():
-    session = requests.Session()
-    retries = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504]
-    )
-    adapter = HTTPAdapter(max_retries=retries)
-    session.mount("https://", adapter)
-    return session
+    s = requests.Session()
+    retries = Retry(total=3, backoff_factor=1)
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    return s
 
 session = create_session()
 
@@ -48,49 +47,7 @@ def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 # -------------------------------------------------
-# GEOCODING (ORS → NOMINATIM FALLBACK)
-# -------------------------------------------------
-def geocode(place: str):
-    # --- Try ORS Geocoding ---
-    try:
-        url = "https://api.openrouteservice.org/geocode/search"
-        params = {
-            "api_key": ORS_API_KEY,
-            "text": place,
-            "size": 1
-        }
-        res = session.get(url, params=params, timeout=20)
-        data = res.json()
-
-        if data.get("features"):
-            return data["features"][0]["geometry"]["coordinates"]  # [lon, lat]
-
-    except Exception as e:
-        print("ORS geocoding failed, fallback to Nominatim:", e)
-
-    # --- Fallback: Nominatim ---
-    nom_url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": place,
-        "format": "json",
-        "limit": 1
-    }
-    headers = {
-        "User-Agent": "CommutePredictor/1.0"
-    }
-
-    res = session.get(nom_url, params=params, headers=headers, timeout=10)
-    data = res.json()
-
-    if not data:
-        raise HTTPException(404, f"Location not found: {place}")
-
-    lon = float(data[0]["lon"])
-    lat = float(data[0]["lat"])
-    return [lon, lat]
-
-# -------------------------------------------------
-# OSRM FALLBACK ROUTING (VERY RELIABLE)
+# OSRM ROUTING (STABLE)
 # -------------------------------------------------
 def osrm_route(src, dst):
     url = (
@@ -102,98 +59,48 @@ def osrm_route(src, dst):
     res = session.get(url, timeout=20)
     data = res.json()
 
-    if data.get("routes"):
-        route = data["routes"][0]
-        return {
-            "distance": route["distance"],
-            "duration": route["duration"],
-            "geometry": route["geometry"]["coordinates"]
-        }
+    if not data.get("routes"):
+        return None
 
-    return None
+    route = data["routes"][0]
+    return {
+        "distance": route["distance"],
+        "duration": route["duration"],
+        "geometry": route["geometry"]["coordinates"]
+    }
 
 # -------------------------------------------------
-# ETA + ROUTE API
+# ETA API (JAMMU SAFE)
 # -------------------------------------------------
 @app.get("/eta")
 def get_eta(source: str, destination: str):
 
-    # 1. Geocode
-    src_coords = geocode(source)
-    dst_coords = geocode(destination)
+    # ---- STRICT VALIDATION ----
+    if source not in JAMMU_LOCATIONS:
+        raise HTTPException(400, "Invalid source location")
 
-    print("SRC:", src_coords, "DST:", dst_coords)
+    if destination not in JAMMU_LOCATIONS:
+        raise HTTPException(400, "Invalid destination location")
 
-    # 2. Try ORS routing
-    headers = {
-        "Authorization": ORS_API_KEY,
-        "Content-Type": "application/json"
-    }
+    if source == destination:
+        raise HTTPException(400, "Source and destination cannot be same")
 
-    body = {
-        "coordinates": [src_coords, dst_coords],
-        "geometry": True,
-        "geometry_format": "geojson"
-    }
+    # ---- USE TRUSTED COORDS ----
+    src = JAMMU_LOCATIONS[source]
+    dst = JAMMU_LOCATIONS[destination]
 
-    profiles = ["driving-car", "driving-hgv", "cycling-regular"]
-    data = None
+    route = osrm_route(src, dst)
+    if not route:
+        raise HTTPException(404, "No route found")
 
-    for profile in profiles:
-        try:
-            url = f"https://api.openrouteservice.org/v2/directions/{profile}"
-            res = session.post(url, json=body, headers=headers, timeout=25)
-            temp = res.json()
+    distance_km = round(route["distance"] / 1000, 2)
+    duration_min = round(route["duration"] / 60, 2)
 
-            if temp.get("routes"):
-                data = temp
-                break
-
-        except Exception as e:
-            print(f"ORS routing failed ({profile}):", e)
-
-    # -------------------------------------------------
-    # ORS SUCCESS
-    # -------------------------------------------------
-    if data:
-        route = data["routes"][0]
-        summary = route["summary"]
-
-        distance_km = round(summary["distance"] / 1000, 2)
-        duration_min = round(summary["duration"] / 60, 2)
-
-        geometry = [
-            [coord[1], coord[0]]
-            for coord in route["geometry"]["coordinates"]
-        ]
-
-        return {
-            "distance": f"{distance_km} km",
-            "duration_normal": f"{duration_min} mins",
-            "duration_in_traffic": f"{duration_min} mins",
-            "geometry": geometry
-        }
-
-    # -------------------------------------------------
-    # ORS FAILED → OSRM FALLBACK
-    # -------------------------------------------------
-    osrm = osrm_route(src_coords, dst_coords)
-
-    if not osrm:
-        raise HTTPException(404, "No route found (ORS + OSRM failed)")
-
-    distance_km = round(osrm["distance"] / 1000, 2)
-    duration_min = round(osrm["duration"] / 60, 2)
-
-    geometry = [
-        [coord[1], coord[0]]
-        for coord in osrm["geometry"]
-    ]
+    geometry = [[lat, lon] for lon, lat in route["geometry"]]
 
     return {
         "distance": f"{distance_km} km",
         "duration_normal": f"{duration_min} mins",
-        "duration_in_traffic": f"{duration_min} mins",
         "geometry": geometry
     }
 
